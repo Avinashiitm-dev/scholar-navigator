@@ -1,25 +1,53 @@
 """Data providers. Olostep = main layer, Crustdata = second source."""
 import asyncio
+import hashlib
 import os
+from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
 
 OFFICIAL_SUFFIXES = (".gov.in", ".nic.in")
 SEED_URLS = ["https://scholarships.gov.in/"]  # reliable fallback
+DEFAULT_CACHE_DIR = Path(".cache/pages")
 
 
 def is_official(url: str) -> bool:
     return (urlparse(url).hostname or "").endswith(OFFICIAL_SUFFIXES)
 
 
-async def fetch_page(url: str) -> str:
-    """Olostep scrape -> markdown via raw REST.
+def _cache_path(url: str, cache_dir: Path | None = None) -> Path:
+    base = cache_dir or Path(os.environ.get("PAGE_CACHE_DIR") or DEFAULT_CACHE_DIR)
+    digest = hashlib.sha256(url.encode("utf-8")).hexdigest()
+    return base / f"{digest}.md"
+
+
+def _should_bypass_cache(bypass_cache: bool | None) -> bool:
+    if bypass_cache is not None:
+        return bypass_cache
+    return os.environ.get("BYPASS_PAGE_CACHE", "").strip().lower() in ("1", "true", "yes")
+
+
+async def fetch_page(
+    url: str,
+    bypass_cache: bool | None = None,
+    cache_dir: Path | None = None,
+) -> str:
+    """Olostep scrape -> markdown via raw REST, with URL-hashed disk cache.
 
     The API returns result.markdown_content inline for most pages.
     For large pages it sets markdown_content=null and provides
     result.markdown_hosted_url instead; we fetch that URL to get the content.
+
+    Cached pages are stored under ``PAGE_CACHE_DIR`` (default ``.cache/pages``)
+    keyed by SHA-256 of the URL. Set ``bypass_cache=True`` or env var
+    ``BYPASS_PAGE_CACHE=1`` to skip reading from the cache and fetch fresh.
     """
+    bypass = _should_bypass_cache(bypass_cache)
+    cache_file = _cache_path(url, cache_dir)
+    if not bypass and cache_file.is_file():
+        return cache_file.read_text(encoding="utf-8")
+
     async with httpx.AsyncClient(timeout=90) as c:
         r = await c.post(
             "https://api.olostep.com/v1/scrapes",
@@ -36,7 +64,11 @@ async def fetch_page(url: str) -> str:
                 hosted = await c.get(hosted_url, follow_redirects=True)
                 hosted.raise_for_status()
                 content = hosted.text
-        return content
+
+    if content:
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        cache_file.write_text(content, encoding="utf-8")
+    return content
 
 
 async def olostep_discover(query: str, limit: int) -> list[str]:

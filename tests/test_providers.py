@@ -122,7 +122,7 @@ def _make_text_response(text):
 
 
 @pytest.mark.asyncio
-async def test_fetch_page_inline_markdown():
+async def test_fetch_page_inline_markdown(tmp_path):
     """When markdown_content is present inline, return it directly."""
     scrape_resp = _make_scrape_response(
         {"markdown_content": "# Hello\nSome content", "markdown_hosted_url": None}
@@ -132,8 +132,9 @@ async def test_fetch_page_inline_markdown():
     mock_client.__aexit__.return_value = False
     mock_client.post = AsyncMock(return_value=scrape_resp)
 
+    env = {"OLOSTEP_API_KEY": "test-key", "PAGE_CACHE_DIR": str(tmp_path)}
     with patch("app.providers.httpx.AsyncClient", return_value=mock_client), \
-         patch("app.providers.os.environ", {"OLOSTEP_API_KEY": "test-key"}):
+         patch("app.providers.os.environ", env):
         result = await fetch_page("https://scholarships.gov.in/")
 
     assert result == "# Hello\nSome content"
@@ -141,7 +142,7 @@ async def test_fetch_page_inline_markdown():
 
 
 @pytest.mark.asyncio
-async def test_fetch_page_hosted_url_fallback():
+async def test_fetch_page_hosted_url_fallback(tmp_path):
     """When markdown_content is null, fetch from markdown_hosted_url."""
     hosted_content = "# Large page content " * 1000
     scrape_resp = _make_scrape_response({
@@ -156,8 +157,9 @@ async def test_fetch_page_hosted_url_fallback():
     mock_client.post = AsyncMock(return_value=scrape_resp)
     mock_client.get = AsyncMock(return_value=hosted_resp)
 
+    env = {"OLOSTEP_API_KEY": "test-key", "PAGE_CACHE_DIR": str(tmp_path)}
     with patch("app.providers.httpx.AsyncClient", return_value=mock_client), \
-         patch("app.providers.os.environ", {"OLOSTEP_API_KEY": "test-key"}):
+         patch("app.providers.os.environ", env):
         result = await fetch_page("https://scholarships.gov.in/big-page")
 
     assert result == hosted_content
@@ -168,7 +170,7 @@ async def test_fetch_page_hosted_url_fallback():
 
 
 @pytest.mark.asyncio
-async def test_fetch_page_no_content_no_hosted_url():
+async def test_fetch_page_no_content_no_hosted_url(tmp_path):
     """When both inline content and hosted URL are absent, return empty string."""
     scrape_resp = _make_scrape_response(
         {"markdown_content": None, "markdown_hosted_url": None}
@@ -178,9 +180,59 @@ async def test_fetch_page_no_content_no_hosted_url():
     mock_client.__aexit__.return_value = False
     mock_client.post = AsyncMock(return_value=scrape_resp)
 
+    env = {"OLOSTEP_API_KEY": "test-key", "PAGE_CACHE_DIR": str(tmp_path)}
     with patch("app.providers.httpx.AsyncClient", return_value=mock_client), \
-         patch("app.providers.os.environ", {"OLOSTEP_API_KEY": "test-key"}):
+         patch("app.providers.os.environ", env):
         result = await fetch_page("https://example.gov.in/empty")
 
     assert result == ""
     mock_client.get.assert_not_called()
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_fetch_page_writes_and_reads_disk_cache(tmp_path):
+    """Second call for the same URL returns disk cache without calling HTTP."""
+    scrape_resp = _make_scrape_response(
+        {"markdown_content": "# Cached scheme", "markdown_hosted_url": None}
+    )
+    mock_client = AsyncMock()
+    mock_client.__aenter__.return_value = mock_client
+    mock_client.__aexit__.return_value = False
+    mock_client.post = AsyncMock(return_value=scrape_resp)
+
+    env = {"OLOSTEP_API_KEY": "test-key", "PAGE_CACHE_DIR": str(tmp_path)}
+    with patch("app.providers.httpx.AsyncClient", return_value=mock_client), \
+         patch("app.providers.os.environ", env):
+        first = await fetch_page("https://scholarships.gov.in/scheme")
+        second = await fetch_page("https://scholarships.gov.in/scheme")
+
+    assert first == "# Cached scheme"
+    assert second == "# Cached scheme"
+    mock_client.post.assert_called_once()
+    assert len(list(tmp_path.glob("*.md"))) == 1
+
+
+@pytest.mark.asyncio
+async def test_fetch_page_bypass_cache_arg_and_env(tmp_path):
+    """bypass_cache=True or BYPASS_PAGE_CACHE=1 skips reading cache."""
+    scrape_resp_1 = _make_scrape_response({"markdown_content": "v1"})
+    scrape_resp_2 = _make_scrape_response({"markdown_content": "v2"})
+    scrape_resp_3 = _make_scrape_response({"markdown_content": "v3"})
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__.return_value = mock_client
+    mock_client.__aexit__.return_value = False
+    mock_client.post = AsyncMock(side_effect=[scrape_resp_1, scrape_resp_2, scrape_resp_3])
+
+    env = {"OLOSTEP_API_KEY": "test-key", "PAGE_CACHE_DIR": str(tmp_path)}
+    with patch("app.providers.httpx.AsyncClient", return_value=mock_client), \
+         patch("app.providers.os.environ", env):
+        assert await fetch_page("https://scholarships.gov.in/s") == "v1"
+        assert await fetch_page("https://scholarships.gov.in/s", bypass_cache=True) == "v2"
+        env["BYPASS_PAGE_CACHE"] = "1"
+        assert await fetch_page("https://scholarships.gov.in/s") == "v3"
+        env.pop("BYPASS_PAGE_CACHE")
+        assert await fetch_page("https://scholarships.gov.in/s") == "v3"
+
+    assert mock_client.post.call_count == 3

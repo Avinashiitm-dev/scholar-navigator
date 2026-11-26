@@ -5,3 +5,5 @@ anthropic
 pydantic
 olostep
 pytest
+
+pytest-asyncio

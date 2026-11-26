@@ -2,10 +2,11 @@ import json
 import os
 import re
 
-from anthropic import AsyncAnthropic
+from google import genai
+from google.genai import types
 
-MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-5-5")
-_client: AsyncAnthropic | None = None
+MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+_client: genai.Client | None = None
 
 
 def parse_json(text: str):
@@ -13,11 +14,16 @@ def parse_json(text: str):
     return json.loads(text)
 
 
-async def ask_json(system: str, user: str, max_tokens: int = 3000):
+async def ask_json(system: str, user: str, max_tokens: int = 4096):
     global _client
-    _client = _client or AsyncAnthropic()
-    r = await _client.messages.create(
-        model=MODEL, max_tokens=max_tokens, system=system,
-        messages=[{"role": "user", "content": user}],
+    _client = _client or genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+    r = await _client.aio.models.generate_content(
+        model=MODEL,
+        contents=user,
+        config=types.GenerateContentConfig(
+            system_instruction=system,
+            max_output_tokens=max_tokens,
+            response_mime_type="application/json",
+        ),
     )
-    return parse_json(r.content[0].text)
+    return parse_json(r.text)
