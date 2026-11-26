@@ -14,7 +14,12 @@ def is_official(url: str) -> bool:
 
 
 async def fetch_page(url: str) -> str:
-    """Olostep scrape -> markdown. POST /v1/scrapes (url_to_scrape, formats)."""
+    """Olostep scrape -> markdown via raw REST.
+
+    The API returns result.markdown_content inline for most pages.
+    For large pages it sets markdown_content=null and provides
+    result.markdown_hosted_url instead; we fetch that URL to get the content.
+    """
     async with httpx.AsyncClient(timeout=90) as c:
         r = await c.post(
             "https://api.olostep.com/v1/scrapes",
@@ -22,17 +27,30 @@ async def fetch_page(url: str) -> str:
             json={"url_to_scrape": url, "formats": ["markdown"]},
         )
         r.raise_for_status()
-        # Big pages may come back as a hosted URL instead of inline content.
-        return (r.json().get("result") or {}).get("markdown_content") or ""
+        result = (r.json().get("result") or {})
+        content = result.get("markdown_content") or ""
+        if not content:
+            # Large page: content was offloaded to a hosted URL
+            hosted_url = result.get("markdown_hosted_url") or ""
+            if hosted_url:
+                hosted = await c.get(hosted_url, follow_redirects=True)
+                hosted.raise_for_status()
+                content = hosted.text
+        return content
 
 
 async def olostep_discover(query: str, limit: int) -> list[str]:
+    """Use the official olostep SDK to search the web.
+
+    SearchesResult.links is a list of dicts (each with key "url")
+    produced by SearchLink.model_dump() inside the SDK.
+    """
     from olostep import AsyncOlostep  # official SDK
     async with AsyncOlostep(api_key=os.environ["OLOSTEP_API_KEY"]) as client:
         res = await client.searches.create(query=query, limit=limit * 3)
     urls = []
-    for link in res.links:  # VERIFY field name against the SDK docs
-        u = getattr(link, "url", None) or (link.get("url") if isinstance(link, dict) else None)
+    for link in res.links:  # each element is a dict from model_dump()
+        u = link.get("url") if isinstance(link, dict) else getattr(link, "url", None)
         if u:
             urls.append(u)
     return urls
