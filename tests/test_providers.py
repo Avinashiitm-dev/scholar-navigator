@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.providers import fetch_page, is_official, olostep_discover
+from app.providers import crustdata_discover, discover, fetch_page, is_official, olostep_discover
 
 
 # ---------------------------------------------------------------------------
@@ -236,3 +236,77 @@ async def test_fetch_page_bypass_cache_arg_and_env(tmp_path):
         assert await fetch_page("https://scholarships.gov.in/s") == "v3"
 
     assert mock_client.post.call_count == 3
+
+
+# ---------------------------------------------------------------------------
+# crustdata_discover & discover fallback
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_crustdata_discover_returns_urls():
+    """crustdata_discover sends expected headers/payload and extracts result URLs."""
+    resp = MagicMock()
+    resp.raise_for_status = MagicMock()
+    resp.json.return_value = {
+        "success": True,
+        "results": [
+            {"source": "web", "title": "NSP", "url": "https://scholarships.gov.in/home", "position": 1},
+            {"source": "web", "title": "Blog", "url": "https://example.com/blog", "position": 2},
+            {"source": "web", "title": "No URL"},
+        ],
+    }
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__.return_value = mock_client
+    mock_client.__aexit__.return_value = False
+    mock_client.post = AsyncMock(return_value=resp)
+
+    with patch("app.providers.httpx.AsyncClient", return_value=mock_client), \
+         patch("app.providers.os.environ", {"CRUSTDATA_API_KEY": "test-crust-key"}):
+        urls = await crustdata_discover("Bihar OBC scholarship", limit=4)
+
+    assert urls == ["https://scholarships.gov.in/home", "https://example.com/blog"]
+    mock_client.post.assert_called_once_with(
+        "https://api.crustdata.com/web/search/live",
+        headers={
+            "Authorization": "Bearer test-crust-key",
+            "x-api-version": "2025-11-01",
+        },
+        json={"query": "Bihar OBC scholarship", "sources": ["web"]},
+    )
+
+
+@pytest.mark.asyncio
+async def test_crustdata_discover_missing_key_returns_empty():
+    """Missing CRUSTDATA_API_KEY returns [] without making HTTP calls."""
+    with patch("app.providers.httpx.AsyncClient") as mock_cls, \
+         patch("app.providers.os.environ", {}):
+        urls = await crustdata_discover("Bihar OBC scholarship", limit=4)
+
+    assert urls == []
+    mock_cls.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_crustdata_failure_carries_on_with_olostep():
+    """If Crustdata fails, discover() still returns Olostep official URLs."""
+    mock_client = AsyncMock()
+    mock_client.__aenter__.return_value = mock_client
+    mock_client.__aexit__.return_value = False
+    mock_client.post = AsyncMock(side_effect=RuntimeError("Crustdata 503"))
+
+    links = [
+        {"url": "https://scholarships.gov.in/post-matric"},
+        {"url": "https://example.com/non-official"},
+        {"url": "https://pmsonline.bih.nic.in/"},
+    ]
+    env = {"OLOSTEP_API_KEY": "test-olostep", "CRUSTDATA_API_KEY": "test-crust"}
+    with _inject_fake_olostep(links), \
+         patch("app.providers.httpx.AsyncClient", return_value=mock_client), \
+         patch("app.providers.os.environ", env):
+        urls = await discover("Bihar OBC scholarship", limit=4)
+
+    assert urls == [
+        "https://scholarships.gov.in/post-matric",
+        "https://pmsonline.bih.nic.in/",
+    ]

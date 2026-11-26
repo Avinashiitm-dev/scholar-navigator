@@ -7,3 +7,5 @@ olostep
 pytest
 
 pytest-asyncio
+
+google-genai

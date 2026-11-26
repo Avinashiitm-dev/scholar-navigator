@@ -89,9 +89,33 @@ async def olostep_discover(query: str, limit: int) -> list[str]:
 
 
 async def crustdata_discover(query: str, limit: int) -> list[str]:
-    """TODO: call Crustdata Web Search API (docs.crustdata.com) with
-    CRUSTDATA_API_KEY and return result URLs. Empty until wired."""
-    return []
+    """Call Crustdata Web Search API (POST /web/search/live) and return result URLs.
+
+    Returns [] if CRUSTDATA_API_KEY is unset or the request fails so discover()
+    carries on with Olostep alone.
+    """
+    api_key = os.environ.get("CRUSTDATA_API_KEY", "").strip()
+    if not api_key:
+        return []
+    try:
+        async with httpx.AsyncClient(timeout=30) as c:
+            r = await c.post(
+                "https://api.crustdata.com/web/search/live",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "x-api-version": "2025-11-01",
+                },
+                json={"query": query[:5000], "sources": ["web"]},
+            )
+            r.raise_for_status()
+            results = r.json().get("results") or []
+        return [
+            item["url"]
+            for item in results
+            if isinstance(item, dict) and item.get("url")
+        ][: limit * 3]
+    except Exception:
+        return []
 
 
 async def discover(query: str, limit: int = 4) -> list[str]:
